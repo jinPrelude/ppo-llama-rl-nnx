@@ -140,7 +140,7 @@ class TransformerBlock(nnx.Module):
         ff = self.ffn_norm(h)
         return h + self.w2(jax.nn.silu(self.w1(ff)) * self.w3(ff))
 
-    def step(self, x_t, cached_k, cached_v, positions, prefix_mask):
+    def step(self, x_t, cached_k, cached_v, positions, prefix_mask, return_attention=False):
         x = x_t[:, None, :]
         B = x.shape[0]
 
@@ -168,6 +168,8 @@ class TransformerBlock(nnx.Module):
         # FFN
         ff = self.ffn_norm(h)
         h = h + self.w2(jax.nn.silu(self.w1(ff)) * self.w3(ff))
+        if return_attention:
+            return h[:, 0], k[:, -1:], v[:, -1:], attn_weights
         return h[:, 0], k[:, -1:], v[:, -1:]
 
 
@@ -197,37 +199,43 @@ class TransformerBackbone(nnx.Module):
             pos=jnp.zeros((batch_size,), dtype=jnp.int32),
         )
 
-    def step(self, x_t, state: TransformerState):
-        # prefix_len entries are valid in the cache; prefix_mask marks which positions are valid
+    def step(self, x_t, state: TransformerState, return_attention=False):
         prefix_len = jnp.minimum(state.valid_len, self.cfg.context_len - 1)
         prefix_idx = jnp.arange(self.cfg.context_len, dtype=jnp.int32)[None, :]
-        prefix_mask = prefix_idx >= (self.cfg.context_len - prefix_len[:, None])  # most recent prefix_len entries are valid
+        prefix_mask = prefix_idx >= (self.cfg.context_len - prefix_len[:, None])
         positions = state.pos[:, None]
 
-        # Each layer reads from original cache, collects new k/v into lists
         k_list, v_list = [], []
+        attn_list = []
         for layer_idx, layer in enumerate(self.layers):
-            x_t, k_new, v_new = layer.step(
+            result = layer.step(
                 x_t,
                 state.k_cache[:, layer_idx],
                 state.v_cache[:, layer_idx],
                 positions,
                 prefix_mask,
+                return_attention=return_attention,
             )
+            if return_attention:
+                x_t, k_new, v_new, layer_attn = result
+                attn_list.append(layer_attn)
+            else:
+                x_t, k_new, v_new = result
             merged_k = jnp.concatenate([state.k_cache[:, layer_idx], k_new], axis=1)
             merged_v = jnp.concatenate([state.v_cache[:, layer_idx], v_new], axis=1)
             k_list.append(merged_k[:, -self.cfg.context_len:])
             v_list.append(merged_v[:, -self.cfg.context_len:])
 
-        return (
-            TransformerState(
-                k_cache=jnp.stack(k_list, axis=1),
-                v_cache=jnp.stack(v_list, axis=1),
-                valid_len=jnp.minimum(state.valid_len + 1, self.cfg.context_len),
-                pos=state.pos + 1,
-            ),
-            self.final_norm(x_t),
+        new_state = TransformerState(
+            k_cache=jnp.stack(k_list, axis=1),
+            v_cache=jnp.stack(v_list, axis=1),
+            valid_len=jnp.minimum(state.valid_len + 1, self.cfg.context_len),
+            pos=state.pos + 1,
         )
+        hidden = self.final_norm(x_t)
+        if return_attention:
+            return new_state, hidden, attn_list
+        return new_state, hidden
 
     def unroll(self, x_seq, done_seq):
         """Parallel training forward pass. x_seq: [batch, seq, hidden_dim], done_seq: [batch, seq]."""

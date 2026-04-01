@@ -87,11 +87,16 @@ class PPOTransformerBalletSymbolic(nnx.Module):
     def init_state(self, batch_size: int) -> TransformerState:
         return self.backbone.init_state(batch_size, dtype=self.transformer_cfg.dtype)
 
-    def step(self, obs, state: TransformerState):
+    def step(self, obs, state: TransformerState, return_attention=False):
         hidden = self._encode_obs(obs)
-        next_state, hidden = self.backbone.step(hidden, state)
+        if return_attention:
+            next_state, hidden, attn_list = self.backbone.step(hidden, state, return_attention=True)
+        else:
+            next_state, hidden = self.backbone.step(hidden, state)
         logits = self.policy_head(hidden)
         critic = self.critic.predict(self.critic_head(hidden))
+        if return_attention:
+            return logits, critic, next_state, attn_list
         return logits, critic, next_state
 
     def unroll(self, obs_seq, done_seq):

@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Ballet Attention Visualization</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: monospace; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
+h1 { font-size: 18px; margin-bottom: 12px; color: #7ec8e3; }
+
+.controls { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; flex-wrap: wrap; }
+.controls label { font-size: 13px; }
+.controls select, .controls input { font-family: monospace; font-size: 13px; }
+select { background: #16213e; color: #e0e0e0; border: 1px solid #444; padding: 4px 8px; border-radius: 4px; }
+.step-controls { display: flex; align-items: center; gap: 8px; }
+.step-controls button {
+  background: #16213e; color: #e0e0e0; border: 1px solid #444; padding: 4px 10px;
+  border-radius: 4px; cursor: pointer; font-family: monospace;
+}
+.step-controls button:hover { background: #1a3a5c; }
+input[type="range"] { flex: 1; min-width: 200px; }
+
+.info-bar { font-size: 13px; margin-bottom: 16px; color: #aaa; }
+.info-bar span { margin-right: 20px; }
+.info-bar .highlight { color: #7ec8e3; font-weight: bold; }
+
+#chart-container { position: relative; margin-bottom: 16px; }
+canvas { display: block; width: 100%; background: #16213e; border-radius: 6px; border: 1px solid #333; }
+
+.legend { display: flex; gap: 20px; margin-bottom: 16px; font-size: 12px; }
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.legend-color { width: 14px; height: 14px; border-radius: 2px; }
+
+#obs-container {
+  background: #16213e; border-radius: 6px; border: 1px solid #333; padding: 16px;
+  min-height: 120px; display: flex; align-items: center; gap: 20px;
+}
+#obs-container img { image-rendering: pixelated; height: 99px; border: 1px solid #555; }
+#obs-info { font-size: 13px; }
+#obs-info div { margin-bottom: 4px; }
+
+.empty-state { color: #666; font-style: italic; }
+
+.notice { margin-top: 16px; padding: 10px; background: #16213e; border-left: 3px solid #7ec8e3; font-size: 12px; color: #888; border-radius: 0 4px 4px 0; }
+</style>
+</head>
+<body>
+
+<h1>Ballet Attention Visualization</h1>
+
+<div class="controls">
+  <label>Episode:
+    <select id="episode-select"></select>
+  </label>
+  <label>View:
+    <select id="view-select">
+      <option value="all">All Layers</option>
+      <option value="layer0">Layer 0</option>
+      <option value="layer1">Layer 1</option>
+      <option value="layer2">Layer 2</option>
+      <option value="layer3">Layer 3</option>
+    </select>
+  </label>
+  <div class="step-controls">
+    <label>Step:</label>
+    <button id="btn-prev">&lt;</button>
+    <input type="range" id="step-slider" min="0" max="0" value="0">
+    <button id="btn-next">&gt;</button>
+  </div>
+</div>
+
+<div class="info-bar" id="info-bar">
+  <span>Loading...</span>
+</div>
+
+<div class="legend" id="legend"></div>
+
+<div id="chart-container">
+  <canvas id="attn-chart" height="520"></canvas>
+</div>
+
+<div id="obs-container">
+  <div class="empty-state">Click a bar in the chart to view the observation at that timestep.</div>
+</div>
+
+<div class="notice">
+  Serve this directory with <code>python -m http.server 8080</code> and open in browser.
+  Use the View dropdown to see attention per layer or per head.
+</div>
+
+<script>
+const BASE = "attention";
+let index = null;
+let metadata = null;
+let currentAttn = null;
+let choiceSteps = [];
+
+const episodeSelect = document.getElementById("episode-select");
+const stepSlider = document.getElementById("step-slider");
+const btnPrev = document.getElementById("btn-prev");
+const btnNext = document.getElementById("btn-next");
+const infoBar = document.getElementById("info-bar");
+const obsContainer = document.getElementById("obs-container");
+const canvas = document.getElementById("attn-chart");
+const ctx = canvas.getContext("2d");
+const viewSelect = document.getElementById("view-select");
+
+const SUB_CHART_HEIGHT = 120;
+
+const LAYER_COLORS = [
+  { dance: "#3a5a8a", choice: "#4a90d9", current: "#6ab0f9" },  // blue
+  { dance: "#3a7a4a", choice: "#4ac94a", current: "#6ae96a" },  // green
+  { dance: "#8a6a2a", choice: "#d9a04a", current: "#f9c06a" },  // orange
+  { dance: "#6a3a7a", choice: "#a04ad9", current: "#c06af9" },  // purple
+];
+
+const HEAD_SHADES = [0.4, 0.6, 0.8, 1.0];
+
+function getChartData(attnData, viewMode) {
+  const weights = attnData.attention_weights;
+  const validLen = weights[0][0].length;
+
+  if (viewMode === "all") {
+    const layers = [];
+    for (let l = 0; l < weights.length; l++) {
+      const avg = new Float32Array(validLen);
+      for (const head of weights[l]) {
+        for (let i = 0; i < validLen; i++) avg[i] += head[i];
+      }
+      for (let i = 0; i < validLen; i++) avg[i] /= weights[l].length;
+      layers.push({ data: avg, label: `Layer ${l}`, colorIdx: l });
+    }
+    return layers.reverse();
+  } else {
+    const layerIdx = parseInt(viewMode.replace("layer", ""));
+    const heads = [];
+    for (let h = 0; h < weights[layerIdx].length; h++) {
+      heads.push({
+        data: new Float32Array(weights[layerIdx][h]),
+        label: `Head ${h}`,
+        colorIdx: layerIdx,
+        headIdx: h,
+      });
+    }
+    return heads;
+  }
+}
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Fetch failed: ${url} (${r.status})`);
+  return r.json();
+}
+
+async function init() {
+  try {
+    index = await fetchJSON(`${BASE}/index.json`);
+  } catch (e) {
+    infoBar.innerHTML = `<span style="color:#e74c3c">Failed to load index.json. Are you serving this directory?</span>`;
+    return;
+  }
+  episodeSelect.innerHTML = "";
+  for (const ep of index.episodes) {
+    const opt = document.createElement("option");
+    opt.value = ep;
+    opt.textContent = ep;
+    episodeSelect.appendChild(opt);
+  }
+  episodeSelect.addEventListener("change", () => loadEpisode(episodeSelect.value));
+  if (index.episodes.length > 0) loadEpisode(index.episodes[0]);
+}
+
+async function loadEpisode(epName) {
+  metadata = await fetchJSON(`${BASE}/${epName}/metadata.json`);
+  choiceSteps = [];
+  if (metadata.choice_phase_start !== null) {
+    for (let t = metadata.choice_phase_start; t < metadata.total_steps; t++) {
+      choiceSteps.push(t);
+    }
+  }
+  if (choiceSteps.length === 0) {
+    infoBar.innerHTML = `<span>No choice phase in this episode.</span>`;
+    return;
+  }
+  stepSlider.min = 0;
+  stepSlider.max = choiceSteps.length - 1;
+  stepSlider.value = 0;
+  loadStep(0);
+}
+
+async function loadStep(sliderIdx) {
+  const timestep = choiceSteps[sliderIdx];
+  const pad = String(timestep).padStart(4, "0");
+  const epName = episodeSelect.value;
+  try {
+    currentAttn = await fetchJSON(`${BASE}/${epName}/attention_step_${pad}.json`);
+  } catch (e) {
+    infoBar.innerHTML = `<span style="color:#e74c3c">Failed to load attention for step ${timestep}</span>`;
+    return;
+  }
+  infoBar.innerHTML = [
+    `<span>Step <span class="highlight">${timestep}</span> / ${metadata.total_steps - 1}</span>`,
+    `<span>Action: <span class="highlight">${currentAttn.action_name}</span></span>`,
+    `<span>Reward: <span class="highlight">${currentAttn.reward.toFixed(1)}</span></span>`,
+    `<span>Target: <span class="highlight">${metadata.lang_name}</span></span>`,
+  ].join("");
+  drawChart(currentAttn, timestep);
+  showObservation(timestep, null);
+}
+
+function updateLegend() {
+  const legend = document.getElementById("legend");
+  const viewMode = viewSelect.value;
+  let html = "";
+  if (viewMode === "all") {
+    const names = ["Layer 0", "Layer 1", "Layer 2", "Layer 3"];
+    for (let i = 0; i < 4; i++) {
+      html += `<div class="legend-item"><div class="legend-color" style="background:${LAYER_COLORS[i].choice}"></div> ${names[i]}</div>`;
+    }
+  } else {
+    const layerIdx = parseInt(viewMode.replace("layer", ""));
+    const base = LAYER_COLORS[layerIdx].choice;
+    for (let h = 0; h < 4; h++) {
+      html += `<div class="legend-item"><div class="legend-color" style="background:${base};opacity:${HEAD_SHADES[h]}"></div> Head ${h}</div>`;
+    }
+  }
+  html += `<div class="legend-item"><div class="legend-color" style="background:#555"></div> Dance Phase</div>`;
+  legend.innerHTML = html;
+}
+
+function drawChart(attnData, currentTimestep) {
+  const viewMode = viewSelect.value;
+  updateLegend();
+  const charts = getChartData(attnData, viewMode);
+  const numCharts = charts.length;
+
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const subH = SUB_CHART_HEIGHT;
+  const gap = 8;
+  const totalH = numCharts * subH + (numCharts - 1) * gap;
+  canvas.width = rect.width * dpr;
+  canvas.height = totalH * dpr;
+  canvas.style.height = totalH + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = rect.width;
+  ctx.clearRect(0, 0, W, totalH);
+
+  const validLen = charts[0].data.length;
+  const choiceStart = metadata.choice_phase_start || 0;
+  const startTimestep = currentTimestep + 1 - validLen;
+
+  const margin = { top: 4, bottom: 16, left: 50, right: 5 };
+  const plotW = W - margin.left - margin.right;
+  const plotH = subH - margin.top - margin.bottom;
+  const barW = Math.max(1, plotW / validLen);
+
+  const layouts = [];
+
+  for (let c = 0; c < numCharts; c++) {
+    const chart = charts[c];
+    const yOffset = c * (subH + gap);
+    let maxAttn = 1e-8;
+    for (let i = 0; i < chart.data.length; i++) {
+      if (chart.data[i] > maxAttn) maxAttn = chart.data[i];
+    }
+    const colors = LAYER_COLORS[chart.colorIdx];
+
+    // Label
+    ctx.fillStyle = "#888";
+    ctx.font = "11px monospace";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillText(chart.label, margin.left - 6, yOffset + subH / 2);
+
+    // Bars
+    for (let i = 0; i < validLen; i++) {
+      const t = startTimestep + i;
+      const x = margin.left + i * barW;
+      const barH = (chart.data[i] / maxAttn) * plotH;
+      const y = yOffset + margin.top + plotH - barH;
+
+      if (t === currentTimestep) {
+        ctx.fillStyle = colors.current;
+      } else if (t >= choiceStart) {
+        ctx.fillStyle = colors.choice;
+      } else {
+        ctx.fillStyle = colors.dance;
+      }
+
+      if (chart.headIdx !== undefined) {
+        ctx.globalAlpha = HEAD_SHADES[chart.headIdx];
+      }
+
+      ctx.fillRect(x, y, Math.max(barW - 1, 1), barH);
+      ctx.globalAlpha = 1.0;
+    }
+
+    // Subtle separator line
+    if (c < numCharts - 1) {
+      ctx.strokeStyle = "#333";
+      ctx.beginPath();
+      ctx.moveTo(margin.left, yOffset + subH + gap / 2);
+      ctx.lineTo(W - margin.right, yOffset + subH + gap / 2);
+      ctx.stroke();
+    }
+
+    layouts.push({ yOffset, margin, plotW, plotH, barW, validLen, startTimestep, data: chart.data });
+  }
+
+  canvas._chartLayouts = layouts;
+}
+
+canvas.addEventListener("mousemove", (e) => {
+  if (!canvas._chartLayouts || !currentAttn) return;
+  const rect = canvas.getBoundingClientRect();
+  const mouseX = e.clientX - rect.left;
+  const mouseY = e.clientY - rect.top;
+
+  for (const layout of canvas._chartLayouts) {
+    const { yOffset, margin, barW, validLen, startTimestep, data } = layout;
+    const subH = SUB_CHART_HEIGHT;
+    if (mouseY < yOffset || mouseY > yOffset + subH) continue;
+
+    const x = mouseX - margin.left;
+    const idx = Math.floor(x / barW);
+    if (idx < 0 || idx >= validLen) return;
+    const t = startTimestep + idx;
+    if (t < 0) return;
+    showObservation(t, data[idx]);
+    return;
+  }
+});
+
+function showObservation(timestep, attnWeight) {
+  const epName = episodeSelect.value;
+  const pad = String(timestep).padStart(4, "0");
+  const imgUrl = `${BASE}/${epName}/observations/step_${pad}.png`;
+  const choiceStart = metadata.choice_phase_start || 0;
+  const phase = timestep >= choiceStart ? "Choice Phase" : "Dance Phase";
+  let info = `<div>Timestep: <strong>${timestep}</strong> (${phase})</div>`;
+  if (attnWeight !== null && attnWeight !== undefined) {
+    info += `<div>Attention weight: <strong>${attnWeight.toFixed(6)}</strong></div>`;
+  }
+  obsContainer.innerHTML = `<img src="${imgUrl}" alt="step ${timestep}"><div id="obs-info">${info}</div>`;
+}
+
+stepSlider.addEventListener("input", () => loadStep(parseInt(stepSlider.value)));
+viewSelect.addEventListener("change", () => {
+  if (currentAttn) drawChart(currentAttn, choiceSteps[parseInt(stepSlider.value)]);
+});
+btnPrev.addEventListener("click", () => {
+  if (parseInt(stepSlider.value) > 0) { stepSlider.value = parseInt(stepSlider.value) - 1; loadStep(parseInt(stepSlider.value)); }
+});
+btnNext.addEventListener("click", () => {
+  if (parseInt(stepSlider.value) < parseInt(stepSlider.max)) { stepSlider.value = parseInt(stepSlider.value) + 1; loadStep(parseInt(stepSlider.value)); }
+});
+
+init();
+</script>
+</body>
+</html>
