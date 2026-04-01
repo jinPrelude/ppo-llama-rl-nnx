@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+wandb/
+runs/
+checkpoints/
+eval_results/
+.vscode/
+docs/
+.claude/
