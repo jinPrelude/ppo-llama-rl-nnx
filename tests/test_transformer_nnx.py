@@ -5,11 +5,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from transformer_nnx import TransformerBackbone, TransformerConfig, TransformerState
-from ppo_core import CategoricalCritic
-from train_ballet_symbolic import PPOTransformerBalletSymbolic, MODEL_DTYPE, PARAM_DTYPE
+from core.transformer_nnx import TransformerBackbone, TransformerConfig, TransformerState
+from core.ppo_core import CategoricalCritic
+from envs.memorygym.train_transformer import PPOTransformerMemoryGym, MODEL_DTYPE, PARAM_DTYPE
 
-OBS_DIM = 8
+OBS_SHAPE = (16, 16, 3)
 NUM_ACTIONS = 4
 
 
@@ -81,8 +81,8 @@ class TransformerUnrollTest(unittest.TestCase):
 
                 self.assertEqual(hidden.shape, (self.batch_size, case["seq_len"], cfg.hidden_dim))
 
-    def test_ppo_transformer_ballet_unroll(self):
-        """Test PPOTransformerBalletSymbolic.unroll returns correct shapes with CategoricalCritic."""
+    def test_ppo_transformer_memorygym_unroll(self):
+        """Test PPOTransformerMemoryGym.unroll returns correct shapes with CategoricalCritic."""
         for case_idx, case in enumerate(self._cases()):
             with self.subTest(case=case["name"]):
                 cfg = TransformerConfig(
@@ -94,15 +94,15 @@ class TransformerUnrollTest(unittest.TestCase):
                     param_dtype=jnp.float32,
                 )
                 critic = CategoricalCritic(num_bins=11, value_min=0.0, value_max=1.0, sigma=0.1)
-                model = PPOTransformerBalletSymbolic(
-                    obs_dim=OBS_DIM,
+                model = PPOTransformerMemoryGym(
+                    obs_shape=OBS_SHAPE,
                     num_actions=NUM_ACTIONS,
                     transformer_cfg=cfg,
                     critic=critic,
                     rngs=nnx.Rngs(1000 + case_idx),
                 )
                 obs_key = jax.random.PRNGKey(300 + case_idx)
-                obs_seq = jax.random.normal(obs_key, (case["seq_len"], self.batch_size, OBS_DIM), dtype=jnp.float32)
+                obs_seq = jax.random.randint(obs_key, (case["seq_len"], self.batch_size, *OBS_SHAPE), 0, 256, dtype=jnp.uint8)
                 done_seq = make_done(case["done"]).T
 
                 logits, critic_pred = model.unroll(obs_seq, done_seq)
@@ -111,8 +111,8 @@ class TransformerUnrollTest(unittest.TestCase):
                 self.assertEqual(critic_pred.logits.shape, (case["seq_len"], self.batch_size, critic.num_bins))
                 self.assertEqual(critic_pred.value.shape, (case["seq_len"], self.batch_size))
 
-    def test_ppo_transformer_ballet_step(self):
-        """Test PPOTransformerBalletSymbolic.step returns correct shapes and advances state."""
+    def test_ppo_transformer_memorygym_step(self):
+        """Test PPOTransformerMemoryGym.step returns correct shapes and advances state."""
         cfg = TransformerConfig(
             hidden_dim=16,
             n_layers=2,
@@ -122,14 +122,14 @@ class TransformerUnrollTest(unittest.TestCase):
             param_dtype=jnp.float32,
         )
         critic = CategoricalCritic(num_bins=11, value_min=0.0, value_max=1.0, sigma=0.1)
-        model = PPOTransformerBalletSymbolic(
-            obs_dim=OBS_DIM,
+        model = PPOTransformerMemoryGym(
+            obs_shape=OBS_SHAPE,
             num_actions=NUM_ACTIONS,
             transformer_cfg=cfg,
             critic=critic,
             rngs=nnx.Rngs(42),
         )
-        obs = jax.random.normal(jax.random.PRNGKey(0), (self.batch_size, OBS_DIM), dtype=jnp.float32)
+        obs = jax.random.randint(jax.random.PRNGKey(0), (self.batch_size, *OBS_SHAPE), 0, 256, dtype=jnp.uint8)
         state = model.init_state(self.batch_size)
 
         logits, critic_pred, next_state = model.step(obs, state)

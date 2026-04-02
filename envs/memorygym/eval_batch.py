@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from argparse import ArgumentParser
 from pathlib import Path
@@ -14,22 +15,20 @@ import memory_gym  # noqa: F401
 import numpy as np
 from tqdm import tqdm
 
-from transformer_nnx import TransformerConfig
-from ppo_core import CategoricalCritic
-from train_memorygym import PPOTransformerMemoryGym, MODEL_DTYPE, PARAM_DTYPE, SUPPORTED_ENVS
-from eval_utils import load_checkpoint, greedy_action, save_video
+from core.transformer_nnx import TransformerConfig
+from core.ppo_core import CategoricalCritic
+from envs.memorygym.train_transformer import PPOTransformerMemoryGym, MODEL_DTYPE, PARAM_DTYPE, SUPPORTED_ENVS
+from core.eval_utils import load_checkpoint, greedy_action
 
 
 def parse_arguments():
-    parser = ArgumentParser(description="Evaluate trained PPO Transformer on MemoryGym env")
+    parser = ArgumentParser(description="Batch evaluate PPO Transformer on MemoryGym env")
     parser.add_argument("--checkpoint-dir", type=str, required=True, help="Orbax checkpoint directory")
     parser.add_argument("--step", type=int, default=None, help="Checkpoint step (default: latest)")
     parser.add_argument("--env-name", type=str, default="Endless-MysteryPath-v0")
-    parser.add_argument("--render-mode", type=str, default="rgb_array")
     parser.add_argument("--max-steps", type=int, default=None, help="Max steps per episode (default: env max or 1000)")
-    parser.add_argument("--num-episodes", type=int, default=20)
-    parser.add_argument("--num-videos", type=int, default=5)
-    parser.add_argument("--fps", type=int, default=10)
+    parser.add_argument("--num-episodes", type=int, default=200)
+    parser.add_argument("--batch-size", type=int, default=50, help="Parallel envs per wave")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--context-len", type=int, default=512)
 
@@ -106,77 +105,88 @@ def main():
     step = load_checkpoint(model, args.checkpoint_dir, args.step)
     print(f"Checkpoint loaded (step {step})")
 
-    episodes = []
-    all_frames = {}
+    all_episodes = []
+    num_waves = math.ceil(args.num_episodes / args.batch_size)
 
-    for ep in tqdm(range(args.num_episodes), desc="Evaluating"):
-        env = gym.make(args.env_name, render_mode=args.render_mode)
-        obs = env.reset(seed=args.seed + ep)[0]
-        state = model.init_state(batch_size=1)
+    for wave in tqdm(range(num_waves), desc="Waves"):
+        wave_start = wave * args.batch_size
+        actual_batch = min(args.batch_size, args.num_episodes - wave_start)
 
-        frames = []
-        total_reward = 0.0
-        length = 0
+        envs = gym.vector.AsyncVectorEnv([
+            lambda i=i: gym.make(args.env_name, render_mode=None)
+            for i in range(actual_batch)
+        ])
+        try:
+            obs, _ = envs.reset(seed=[args.seed + wave_start + i for i in range(actual_batch)])
+            state = model.init_state(actual_batch)
 
-        for _ in range(max_steps):
-            action, state = greedy_action(model, obs[None], state)
-            action_int = int(action.item())
-            if ep < args.num_videos:
-                frames.append(env.render())
-            next_obs, reward, terminated, truncated, info = env.step(action_int)
-            total_reward += float(reward)
-            length += 1
-            if terminated or truncated:
-                break
-            obs = next_obs
+            lengths = np.zeros(actual_batch, dtype=np.int32)
+            rewards = np.zeros(actual_batch, dtype=np.float64)
+            done_flags = np.zeros(actual_batch, dtype=bool)
 
-        env.close()
-        episodes.append({"episode": ep, "reward": total_reward, "length": length})
-        if frames:
-            all_frames[ep] = frames
+            for t in range(max_steps):
+                # obs from SyncVectorEnv is already (N, H, W, C) — no [None] needed
+                actions, state = greedy_action(model, obs, state)
+                actions_np = np.asarray(actions).reshape(-1)
+                obs, reward, terminated, truncated, info = envs.step(actions_np)
 
-    ckpt_name = Path(args.checkpoint_dir).name
-    output_dir = Path("eval_results") / ckpt_name / f"step_{step}" / args.env_name
-    videos_dir = output_dir / "videos"
-    videos_dir.mkdir(parents=True, exist_ok=True)
+                active = ~done_flags
+                lengths += active.astype(np.int32)
+                rewards += reward * active
 
-    for ep, frames in all_frames.items():
-        video_path = videos_dir / f"episode_{ep:03d}.mp4"
-        save_video(frames, str(video_path), args.fps)
-        episodes[ep]["video"] = f"videos/episode_{ep:03d}.mp4"
+                newly_done = active & (terminated | truncated)
+                done_flags |= newly_done
 
-    for ep_data in episodes:
-        if "video" not in ep_data:
-            ep_data["video"] = None
+                if done_flags.all():
+                    break
+        finally:
+            envs.close()
 
-    rewards = [e["reward"] for e in episodes]
-    lengths = [e["length"] for e in episodes]
+        for i in range(actual_batch):
+            all_episodes.append({
+                "episode": wave_start + i,
+                "reward": float(rewards[i]),
+                "length": int(lengths[i]),
+            })
+
+    # Compute summary
+    all_rewards = [e["reward"] for e in all_episodes]
+    all_lengths = [e["length"] for e in all_episodes]
+    survival_thresholds = [512, 1024, 1536, 2048]
+    survival_rates = {}
+    for threshold in survival_thresholds:
+        survival_rates[str(threshold)] = float(np.mean([l >= threshold for l in all_lengths]))
+
     results = {
         "checkpoint_dir": str(args.checkpoint_dir),
         "step": int(step),
         "env_name": args.env_name,
-        "num_episodes": args.num_episodes,
+        "num_episodes": len(all_episodes),
         "seed": args.seed,
         "max_steps": max_steps,
         "summary": {
-            "reward_mean": float(np.mean(rewards)),
-            "reward_std": float(np.std(rewards)),
-            "length_mean": float(np.mean(lengths)),
-            "length_std": float(np.std(lengths)),
-            "success_rate": float(np.mean([l >= max_steps for l in lengths])),
+            "reward_mean": float(np.mean(all_rewards)),
+            "reward_std": float(np.std(all_rewards)),
+            "length_mean": float(np.mean(all_lengths)),
+            "length_std": float(np.std(all_lengths)),
+            "survival_rates": survival_rates,
         },
-        "episodes": episodes,
+        "episodes": all_episodes,
     }
-    results_path = output_dir / "results.json"
+
+    ckpt_name = Path(args.checkpoint_dir).name
+    output_dir = Path("eval_results") / ckpt_name / f"step_{step}" / f"{args.env_name}_ctx{args.context_len}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results_path = output_dir / "batch_results.json"
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
 
     print(f"\nResults ({args.num_episodes} episodes, max_steps={max_steps}):")
     print(f"  Reward: {results['summary']['reward_mean']:.4f} +/- {results['summary']['reward_std']:.4f}")
     print(f"  Length: {results['summary']['length_mean']:.1f} +/- {results['summary']['length_std']:.1f}")
-    print(f"  Success rate: {results['summary']['success_rate']:.2%}")
-    print(f"  Videos saved: {len(all_frames)}")
-    print(f"  Output: {output_dir}")
+    for threshold, rate in survival_rates.items():
+        print(f"  Survival >= {threshold}: {rate:.2%}")
+    print(f"  Output: {results_path}")
 
 
 if __name__ == "__main__":

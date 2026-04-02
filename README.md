@@ -2,6 +2,23 @@
 
 PPO with LLaMA-style Transformer backbone (Flax NNX) for memory-demanding RL environments.
 
+## Project Structure
+
+```
+core/                   # Shared modules
+  transformer_nnx.py    # LLaMA-style Transformer backbone
+  ppo_core.py           # PPO algorithm
+  eval_utils.py         # Checkpoint loading, greedy action, video saving
+envs/                   # Environment-specific code
+  memorygym/            # MemoryGym environments
+    train_transformer.py
+    eval_batch.py
+    eval_render.py
+    plot_mysterypath.py
+```
+
+See [docs/CONVENTIONS.md](docs/CONVENTIONS.md) for naming conventions and how to add new environments/backbones.
+
 ## Installation
 
 ```bash
@@ -9,13 +26,12 @@ pip install -r requirements.txt
 wandb login
 ```
 
-
-## Training
+## Training (MemoryGym)
 
 Trained on RTX6000 PRO + 32 CPUs. Total training time: 1 day 9 hours.
 
 ```bash
-python train_memorygym.py --env-name Endless-MysteryPath-v0 --context-len 512 --save-ckpt-every 5_000_000 --learning-rate 0.0001
+python -m envs.memorygym.train_transformer --env-name Endless-MysteryPath-v0 --context-len 512 --save-ckpt-every 5_000_000 --learning-rate 0.0001
 ```
 
 ### Training Curves
@@ -31,19 +47,17 @@ python train_memorygym.py --env-name Endless-MysteryPath-v0 --context-len 512 --
   </tr>
 </table>
 
-## Evaluation
-
-Two eval scripts are provided:
+## Evaluation (MemoryGym)
 
 | Script | Purpose | Parallelism | Output |
 |--------|---------|-------------|--------|
-| `eval_memorygym_batch.py` | Fast stats collection | `AsyncVectorEnv` (parallel envs) | `batch_results.json` + survival rates |
-| `eval_memorygym_render.py` | Video rendering | Sequential (single env) | `results.json` + mp4 videos |
+| `envs/memorygym/eval_batch.py` | Fast stats collection | `AsyncVectorEnv` (parallel envs) | `batch_results.json` + survival rates |
+| `envs/memorygym/eval_render.py` | Video rendering | Sequential (single env) | `results.json` + mp4 videos |
 
 ### Batch evaluation (fast, no video)
 
 ```bash
-python eval_memorygym_batch.py \
+python -m envs.memorygym.eval_batch \
     --checkpoint-dir checkpoints/<run-name> \
     --env-name Endless-MysteryPath-v0 \
     --num-episodes 200 \
@@ -54,7 +68,7 @@ python eval_memorygym_batch.py \
 ### Render evaluation (with video)
 
 ```bash
-python eval_memorygym_render.py \
+python -m envs.memorygym.eval_render \
     --checkpoint-dir checkpoints/<run-name> \
     --env-name Endless-MysteryPath-v0 \
     --num-episodes 20 \
@@ -67,7 +81,7 @@ Results are saved to `eval_results/<run-name>/step_<step>/<env-name>/`.
 ### Plotting
 
 ```bash
-python plot_mysterypath.py --results-path eval_results/<run-name>/step_<step>/<env-name>/batch_results.json
+python -m envs.memorygym.plot_mysterypath --results-path eval_results/<run-name>/step_<step>/<env-name>/batch_results.json
 ```
 
 Generates a survival rate vs step threshold curve from batch eval results.

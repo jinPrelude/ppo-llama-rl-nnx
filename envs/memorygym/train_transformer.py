@@ -18,8 +18,8 @@ import optax
 import wandb
 import orbax.checkpoint as ocp
 
-from transformer_nnx import TransformerBackbone, TransformerConfig, TransformerState, reset_done_in_state
-from ppo_core import (
+from core.transformer_nnx import TransformerBackbone, TransformerConfig, TransformerState, reset_done_in_state
+from core.ppo_core import (
     CategoricalCritic,
     ReplayBuffer,
     sample_action,
