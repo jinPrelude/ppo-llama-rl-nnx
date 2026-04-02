@@ -7,7 +7,6 @@ rlax == 0.1.8
 orbax-checkpoint == 0.11.33
 wandb
 memory-gym @ git+https://github.com/jinPrelude/endless-memory-gym.git
-gym-balletenv @ git+https://github.com/jinPrelude/gym-balletenv.git
 imageio[ffmpeg]
 tqdm
 
