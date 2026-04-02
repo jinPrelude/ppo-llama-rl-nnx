@@ -12,66 +12,64 @@ wandb login
 
 ## Training
 
-### BalletEnv (Symbolic)
+Trained on RTX6000 PRO + 32 CPUs. Total training time: 1 day 9 hours.
 
 ```bash
-# Default: 6 dancers, delay 48
-python train_ballet_symbolic.py --level-name 6_delay48
-
-# Custom difficulty with checkpoint saving
-python train_ballet_symbolic.py \
-    --level-name 5_delay48 \    # give a biggest number of dancers and delay
-    --num-dancers-range 2 3 4 5 \
-    --dance-delay-range 8 16 32 48 \
-    --save-ckpt-dir ./checkpoints
+python train_memorygym.py --env-name Endless-MysteryPath-v0 --context-len 512 --save-ckpt-every 5_000_000 --learning-rate 0.0001
 ```
 
-### MemoryGym (Endless-MysteryPath)
+### Training Curves
 
-```bash
-# Default: Endless-MysteryPath-v0
-python train_memorygym.py --env-name Endless-MysteryPath-v0
-
-# With checkpoint saving
-python train_memorygym.py \
-    --env-name Endless-MysteryPath-v0 \
-    --save-ckpt-dir checkpoints
-```
+<table>
+  <tr>
+    <td><img src="imgs/reward_mean_steps.png" width="400"></td>
+    <td><img src="imgs/length_mean_steps.png" width="400"></td>
+  </tr>
+  <tr>
+    <td><img src="imgs/reward_mean_wallclock.png" width="400"></td>
+    <td><img src="imgs/sps.png" width="400"></td>
+  </tr>
+</table>
 
 ## Evaluation
 
-### BalletEnv (Symbolic)
+Two eval scripts are provided:
+
+| Script | Purpose | Parallelism | Output |
+|--------|---------|-------------|--------|
+| `eval_memorygym_batch.py` | Fast stats collection | `AsyncVectorEnv` (parallel envs) | `batch_results.json` + survival rates |
+| `eval_memorygym_render.py` | Video rendering | Sequential (single env) | `results.json` + mp4 videos |
+
+### Batch evaluation (fast, no video)
 
 ```bash
-python eval_ballet_symbolic.py \
+python eval_memorygym_batch.py \
     --checkpoint-dir checkpoints/<run-name> \
-    --level-name 5_delay16 \
-    --num-episodes 20 \
-    --num-videos 5
-
-# Evaluate a specific checkpoint step
-python eval_ballet_symbolic.py \
-    --checkpoint-dir checkpoints/<run-name> \
-    --step 5000000 \
-    --level-name 6_delay48
-```
-
-Results are saved to `eval_results/<run-name>/step_<step>/<level-name>/`:
-- `results.json` : per-episode reward, length, and success rate summary
-- `videos/` : rendered episode videos (mp4)
-
-### MemoryGym (Endless-MysteryPath)
-
-```bash
-python eval_memorygym.py \
-    --checkpoint-dir checkpoints/ <run-name> \
     --env-name Endless-MysteryPath-v0 \
-    --max-steps 1024 \ # max steps in case of the environment is endless
-    --num-episodes 20 \
-    --num-videos 5
-
+    --num-episodes 200 \
+    --batch-size 50 \
+    --max-steps 2048
 ```
 
-Results are saved to `eval_results/<run-name>/step_<step>/<env-name>/`:
-- `results.json` : per-episode reward, length, and success rate summary
-- `videos/` : rendered episode videos (mp4)
+### Render evaluation (with video)
+
+```bash
+python eval_memorygym_render.py \
+    --checkpoint-dir checkpoints/<run-name> \
+    --env-name Endless-MysteryPath-v0 \
+    --num-episodes 20 \
+    --num-videos 5 \
+    --max-steps 1024
+```
+
+Results are saved to `eval_results/<run-name>/step_<step>/<env-name>/`.
+
+### Plotting
+
+```bash
+python plot_mysterypath.py --results-path eval_results/<run-name>/step_<step>/<env-name>/batch_results.json
+```
+
+Generates a survival rate vs step threshold curve from batch eval results.
+
+![Survival Rate vs Step Threshold](imgs/mysterypath_survival.png)
